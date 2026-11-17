@@ -1,8 +1,18 @@
-// Token Radar's dashboard (radar-2). It reads window.RADAR (written beside dashboard/
+// Token Radar's dashboard (radar-3). It reads window.RADAR (written beside dashboard/
 // by main.ts) and renders the ranked board, a filterable table, a per-protocol detail
 // view with the model's own inputs and the protocol's farm plan. No network: every byte
 // it shows is in data.js. The implied value and the farm plan come from the same shared
 // functions main.ts runs (implied.js, farm.js), so the page and board.json cannot disagree.
+//
+// Blind validation, computed from the snapshot's 119 live-token protocols by main.ts
+// (lib/model.ts validateModel) and carried in DATA.validation — nothing here is fitted
+// on the protocol it predicts: leave-one-out median absolute log error 1.30 for radar-3
+// (flat multiple 1.67, radar-2 1.68); five-fold average 1.26 (radar-2 1.65); predictions
+// within 2x of the real market cap 35/119 (flat 35/119, radar-2 26/119). The size curve
+// slope is -0.50 (within-category -0.34, without the 5 biggest protocols -0.52; market
+// cap itself grows as TVL^0.47). Every row's rank range and implied-value range come
+// from 200 bootstrap refits of the calibration; every farm plan is netted to a break-even
+// and a FARM / THIN / SKIP verdict (18 / 52 / 128 on this snapshot).
 (function () {
   'use strict';
 
@@ -33,9 +43,12 @@
     return 'x' + n.toFixed(2);
   }
 
-  // The model in one call: the page recomputes a row from the snapshot figures and checks
-  // the number board.json carries, so the page's code and the board's data are visibly the
-  // same arithmetic.
+  // The model in one call: the page recomputes a row from the snapshot figures and the
+  // model constants and checks the number board.json carries, so the page's code and the
+  // board's data are visibly the same arithmetic. The size multiplier is recomputed
+  // from the fitted slope and centre TVL, not read back from the row: the row stores
+  // it rounded to 4 decimals for display, and recomputing from the rounded value
+  // would drift from the board by a few dollars.
   function impliedOf(row) {
     return IMPLIED.impliedValue({
       tvl_usd: row.tvl_usd,
@@ -43,7 +56,13 @@
       age_days: row.age_days,
       chains: row.chains,
       category_multiple: row.category_multiple,
+      size_multiplier: IMPLIED.sizeMultiplier(row.tvl_usd, DATA.model.size_slope, DATA.model.size_ref_tvl_usd),
     });
+  }
+
+  function verdictBadge(verdict) {
+    var cls = verdict === 'FARM' ? 'verdict farm' : verdict === 'THIN' ? 'verdict thin' : 'verdict skip';
+    return el('span', { class: cls, text: verdict });
   }
 
   function el(tag, attrs) {
@@ -108,6 +127,8 @@
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else if (key === 'chains') { av = (a.chains || []).length; bv = (b.chains || []).length; }
+      else if (key === 'ranklo') { av = a.rank_lo; bv = b.rank_lo; }
+      else if (key === 'farm') { var order = { FARM: 0, THIN: 1, SKIP: 2 }; av = order[a.farm_verdict]; bv = order[b.farm_verdict]; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -147,21 +168,63 @@
     );
   }
 
+  function validationStrip() {
+    var v = DATA.validation;
+    var counts = { FARM: 0, THIN: 0, SKIP: 0 };
+    DATA.rows.forEach(function (r) { counts[r.farm_verdict] = (counts[r.farm_verdict] || 0) + 1; });
+    return el('section', { class: 'valid-strip' },
+      el('h2', { text: 'Blind test — the model was not fitted on what it predicts' }),
+      el('p', null,
+        'On the snapshot\u2019s ' + v.live_n + ' live-token protocols, each refit on the training part only: leave-one-out median error ',
+        el('b', { text: 'radar-3 ' + v.loo_radar3.male.toFixed(2) }),
+        ' vs flat multiple ' + v.loo_flat.male.toFixed(2) + ' vs radar-2 ' + v.loo_radar2.male.toFixed(2) + '; five-fold average ',
+        el('b', { text: v.fivefold_radar3_male_avg.toFixed(2) }),
+        ' vs ' + v.fivefold_radar2_male_avg.toFixed(2) + '. Within 2x of the real market cap: ' + v.loo_radar3.hit_within_2x + ' (flat ' + v.loo_flat.hit_within_2x + ', radar-2 ' + v.loo_radar2.hit_within_2x + '). Size slope ' + v.slope.toFixed(2) + ' (within-category ' + v.slope_within_category.toFixed(2) + '; without the 5 biggest ' + v.slope_excl_top5_tvl.toFixed(2) + '). Every row carries a rank range from 200 refits and a farm verdict: ' + counts.FARM + ' FARM, ' + counts.THIN + ' THIN, ' + counts.SKIP + ' SKIP.'
+      )
+    );
+  }
+
   function modelPanel() {
     var m = DATA.model;
+    var v = DATA.validation;
     var multiples = Object.keys(m.category_multiples).map(function (c) {
       return { category: c, multiple: m.category_multiples[c] };
     }).sort(function (a, b) { return b.multiple - a.multiple; });
+    function scoreRow(label, s) {
+      return el('tr', null,
+        el('td', { text: label }),
+        el('td', { class: 'num', text: s.male.toFixed(2) }),
+        el('td', { class: 'num', text: s.mean_abs_log_error.toFixed(2) }),
+        el('td', { class: 'num', text: s.hit_within_2x })
+      );
+    }
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'One function scores every row, from the snapshot figures alone. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x category_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + 0.02 x min(chains - 1, 5)) )'
+        'implied = round( tvl_usd x category_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + 0.02 x min(chains - 1, 5)) x size_multiplier )'
       ),
       el('p', { class: 'sub', text: 'The category multiple is calibrated from this snapshot, not chosen by hand: for each category, the median market-cap-to-TVL ratio of its live-token protocols (each ratio winsorized at ' + m.winsor + '), shrunk toward the global median ' + m.global_median + ' with a prior weight of ' + m.prior + ', clamped to [' + m.multiple_min + ', ' + m.multiple_max + ']. A category with no live protocol in the snapshot uses the global median. Age is the time since the protocol was first listed, the best record of how long it has run with no token recorded; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
+      el('p', { class: 'sub', text: 'The size multiplier is exp(' + m.size_slope.toFixed(2) + ' x (ln tvl - ln ' + fmtUsd(m.size_ref_tvl_usd) + ')), the median live TVL, clamped to [1/' + m.size_clamp + ', ' + m.size_clamp + '] — the clamp never binds on this snapshot, it only bounds absurd extrapolation. Market cap grows slower than TVL: on the ' + v.live_n + ' live protocols the log-log slope of the market-cap-to-TVL ratio on TVL is ' + m.size_slope.toFixed(2) + ', so market cap itself grows as TVL^' + v.slope_direct_loglog.toFixed(2) + '. Within categories the slope is ' + v.slope_within_category.toFixed(2) + '; without the 5 biggest protocols ' + v.slope_excl_top5_tvl.toFixed(2) + ', without the 10 biggest ' + v.slope_excl_top10_tvl.toFixed(2) + '.' }),
       el('div', { class: 'chips' }, multiples.map(function (x) {
         return el('span', { class: 'chip', text: x.category + ' x' + x.multiple.toFixed(2) });
-      }))
+      })),
+      el('h2', { text: 'Blind validation' }),
+      el('p', { class: 'sub', text: 'Each fold refits the multiples and the size slope on its training part only; the protocol (or fold) being predicted never trains its own prediction. Error is the absolute log error of predicted vs real market cap; lower is better.' }),
+      el('table', { class: 'valid-table' },
+        el('thead', null, el('tr', null,
+          el('th', { scope: 'col', text: 'Model' }),
+          el('th', { scope: 'col', class: 'num', text: 'Median error' }),
+          el('th', { scope: 'col', class: 'num', text: 'Mean error' }),
+          el('th', { scope: 'col', class: 'num', text: 'Within 2x' })
+        )),
+        el('tbody', null,
+          scoreRow('Flat global multiple (leave-one-out)', v.loo_flat),
+          scoreRow('radar-2, category multiples (leave-one-out)', v.loo_radar2),
+          scoreRow('radar-3, category + size curve (leave-one-out)', v.loo_radar3)
+        )
+      ),
+      el('p', { class: 'sub', text: 'Five-fold split by slug hash, average median error: radar-2 ' + v.fivefold_radar2_male_avg.toFixed(2) + ', radar-3 ' + v.fivefold_radar3_male_avg.toFixed(2) + ' (folds ' + v.fivefold_radar3_male_folds.map(function (x) { return x.toFixed(2); }).join(', ') + '). Ablations from radar-3, dropping one factor at a time (leave-one-out median error): growth ' + v.ablation_drop_growth_male.toFixed(2) + ', maturity ' + v.ablation_drop_maturity_male.toFixed(2) + ', chains ' + v.ablation_drop_chain_male.toFixed(2) + ' — near-noise, kept because the criteria name growth and age and keeping them costs almost nothing. Rank ranges and implied-value ranges are the 10th–90th percentiles of ' + v.bootstrap_refits + ' bootstrap refits of the calibration.' })
     );
   }
 
@@ -238,6 +301,8 @@
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
         )),
+        el('td', { class: 'range', text: r.rank_lo === r.rank_hi ? String(r.rank_lo) : r.rank_lo + '–' + r.rank_hi }),
+        el('td', null, verdictBadge(r.farm_verdict)),
         el('td', null, el('span', { class: 'status', text: 'no token recorded' }))
       );
       tbody.appendChild(tr);
@@ -245,7 +310,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.' }),
+          el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Rank range is the 10th–90th percentile over 200 refits of the calibration. Farm verdict nets the plan\u2019s gas against the low end of the implied-value range: FARM when the rank range sits inside the top 40, THIN when it can still reach it, SKIP otherwise. Select a row for its model and farm plan.' }),
           el('thead', null, el('tr', null,
             sortHeader('implied', 'Rank'),
             sortHeader('name', 'Protocol'),
@@ -254,6 +319,8 @@
             sortHeader('age', 'Age'),
             sortHeader('chains', 'Chains'),
             sortHeader('implied', 'Implied value'),
+            sortHeader('ranklo', 'Rank range'),
+            sortHeader('farm', 'Farm'),
             el('th', { scope: 'col', text: 'Token' })
           )),
           tbody
@@ -301,13 +368,15 @@
     state.selected = slug;
     writeHash();
     dialog.textContent = '';
-    var steps = FARM.farmSteps({
+    var base = {
       name: row.name,
       category: row.category,
       chains: row.chains,
       tvl_usd: row.tvl_usd,
       age_days: row.age_days,
-    });
+    };
+    var economics = FARM.farmEconomics(base, row.implied_lo_usd, row.rank_lo, row.rank_hi);
+    var steps = FARM.farmSteps(base, economics);
     var recomputed = impliedOf(row);
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
@@ -325,9 +394,23 @@
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) + ' -> ' + fmtMult(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Age with no token recorded' }), el('b', { class: 'num', text: fmtAge(row.age_days) + ' -> ' + fmtMult(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Chains (' + (row.chains || []).length + ')' }), el('b', { class: 'num', text: fmtMult(row.chain_multiplier) })),
+        el('div', null, el('span', { text: 'Size (TVL vs median live ' + fmtUsd(DATA.model.size_ref_tvl_usd) + ')' }), el('b', { class: 'num', text: fmtMult(row.size_multiplier) })),
+        el('div', null, el('span', { text: 'Rank range (200 refits, 10–90%)' }), el('b', { class: 'num', text: row.rank_lo === row.rank_hi ? String(row.rank_lo) : row.rank_lo + '–' + row.rank_hi })),
+        el('div', null, el('span', { text: 'Implied-value range (200 refits, 10–90%)' }), el('b', { class: 'num', text: fmtUsd(row.implied_lo_usd) + ' – ' + fmtUsd(row.implied_hi_usd) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed.implied) + (recomputed.implied === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
+    ));
+    dialog.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Farm economics' }),
+      el('div', { class: 'equation' },
+        el('div', null, el('span', { text: 'Verdict' }), verdictBadge(economics.verdict)),
+        el('div', null, el('span', { text: 'Gas for the whole plan' }), el('b', { class: 'num', text: '$' + economics.gas_usd })),
+        el('div', null, el('span', { text: 'Capital locked' }), el('b', { class: 'num', text: '$' + economics.capital_usd + ' for ' + economics.hold_days + ' days' })),
+        el('div', null, el('span', { text: 'Break-even (gas vs low-end implied value)' }), el('b', { class: 'num', text: economics.break_even_pct.toFixed(6) + '%' })),
+        el('div', null, el('span', { text: 'Low-end implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_lo_usd) }))
+      ),
+      el('p', { class: 'sub', text: 'The rule, stated on the board: FARM when the rank range sits inside the top 40 and breaking even needs under 0.001% of the low-end value; THIN when the rank range can still reach the top 40 and breaking even needs under 0.01%; SKIP otherwise. Gas is never the binding constraint here — the median break-even across the board is a few ten-thousandths of a percent — the rank range is what decides.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
@@ -350,6 +433,7 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    shell.appendChild(validationStrip());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());

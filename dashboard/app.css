@@ -1,4 +1,4 @@
-/* Token Radar's theme (radar-2). Warm paper, burnt orange, one type step per level. */
+/* Token Radar's theme (radar-3). Warm paper, burnt orange, one type step per level. */
 :root {
   --canvas: #f6f4ee;
   --surface: #fffdf8;
@@ -43,6 +43,20 @@ body { margin: 0; background: var(--canvas); color: var(--ink); font-family: var
 .model .formula { font-family: var(--mono); font-size: 13px; background: var(--surface-2); border-radius: var(--radius); padding: 14px 16px; overflow-x: auto; white-space: nowrap; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .chip { font-size: 12px; font-family: var(--mono); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; }
+.valid-strip { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--teal); border-radius: var(--radius); margin: 22px 0 0; padding: 14px 16px; }
+.valid-strip h2 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--teal); }
+.valid-strip p { margin: 0; font-size: 14px; color: var(--ink-soft); }
+.valid-strip b { color: var(--ink); font-family: var(--mono); }
+.valid-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+.valid-table th, .valid-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.valid-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.valid-table td.num, .valid-table th.num { font-family: var(--mono); text-align: right; }
+.model h2:not(:first-child) { margin-top: 22px; }
+.verdict { display: inline-block; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 3px 9px; white-space: nowrap; }
+.verdict.farm { color: #fff; background: var(--teal); }
+.verdict.thin { color: #78350f; background: #fde68a; }
+.verdict.skip { color: var(--ink-soft); background: var(--surface-2); border: 1px solid var(--border); }
+.range { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
 .controls { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr auto; gap: 12px; align-items: end; margin: 22px 0 0; }
 .field label, .field .sub { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
 .field input, .field select { width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font: inherit; font-size: 14px; color: var(--ink); }

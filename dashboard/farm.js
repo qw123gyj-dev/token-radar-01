@@ -81,16 +81,26 @@
     return s;
   }
 
+  /** A dollar figure as $42.2M / $3.1K / $850, for the verdict step. */
+  function fmtUsd(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(Math.round(n));
+  }
+
   /**
-   * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is
-   * derived from the protocol's own record (category, chains, TVL, age), never from a
-   * hand-written list of names. p carries name, category, chains, tvl_usd and age_days.
+   * A protocol's farm plan: seven action steps plus one verdict step, each an action
+   * with a cost and a time. The plan is derived from the protocol's own record
+   * (category, chains, TVL, age), never from a hand-written list of names. p carries
+   * name, category, chains, tvl_usd and age_days. economics, when given, carries
+   * { gas_usd, capital_usd, hold_days, break_even_pct, verdict } from farmEconomics.
    */
-  function farmSteps(p) {
+  function farmSteps(p, economics) {
     var chain = chainOf(p);
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
-    return [
+    var steps = [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: "Before you deposit, read the protocol's audit and docs pages and approve only the exact amount instead of an unlimited spend.", cost: 'nothing to read', time: '10 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
@@ -98,7 +108,60 @@
       { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
       { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes, then write the wallet, the dates and every transaction in a farm log.", cost: 'no fee to check, and never pay to claim', time: '15 minutes' }
-    ].map(stepText);
+    ];
+    if (economics) {
+      var e = economics;
+      steps.push({
+        text: 'Verdict: ' + e.verdict + '. The plan costs about $' + e.gas_usd + ' of gas and locks $' + e.capital_usd + ' for ' + e.hold_days + ' days; breaking even needs an airdrop worth $' + e.gas_usd + ', which is ' + e.break_even_pct + '% of the low-end implied value of $' + fmtUsd(e.implied_lo_usd) + ' (the 10th percentile of 200 refits).',
+        cost: 'about $' + e.gas_usd + ' of gas in all',
+        time: e.hold_days + ' days',
+      });
+    }
+    return steps.map(stepText);
+  }
+
+  /**
+   * What a farm plan costs, from the same step costs farmSteps states: $3 for the first
+   * transaction, $4 or $8 to set the position up, $2 for the second action, $2 of gas
+   * for each week held. Capital is locked, not spent, so it is not part of the cost.
+   */
+  function farmCost(p) {
+    var capital = capitalFor(p);
+    var hold = holdDaysFor(p.age_days);
+    var gas = 3 + (capital >= 150 ? 8 : 4) + 2 + 2 * Math.ceil(hold / 7);
+    return { gas_usd: gas, capital_usd: capital, hold_days: hold };
+  }
+
+  /**
+   * A farm verdict from two computed numbers, by a rule the page states: FARM when the
+   * rank holds in the top 40 (the watchlist's size) even at the pessimistic end of the
+   * refits and breaking even needs under 0.001% of the low-end implied value; THIN when
+   * the rank could be top 40 and breaking even needs under 0.01%; SKIP otherwise. The
+   * thresholds are the entry's own rule, stated on the page; the numbers they judge are
+   * computed from the snapshot, never chosen by hand.
+   */
+  function farmVerdict(economics, rankLo, rankHi) {
+    var be = economics.break_even_pct;
+    if (rankHi <= 40 && be < 0.001) return 'FARM';
+    if (rankLo <= 40 && be < 0.01) return 'THIN';
+    return 'SKIP';
+  }
+
+  /** The full economics of farming one protocol: its cost, its break-even and its verdict. */
+  function farmEconomics(p, impliedLoUsd, rankLo, rankHi) {
+    var cost = farmCost(p);
+    var lo = typeof impliedLoUsd === 'number' && impliedLoUsd > 0 ? impliedLoUsd : 1;
+    var be = Math.round((cost.gas_usd / lo) * 100 * 1e6) / 1e6;
+    var economics = {
+      gas_usd: cost.gas_usd,
+      capital_usd: cost.capital_usd,
+      hold_days: cost.hold_days,
+      implied_lo_usd: Math.round(lo),
+      break_even_pct: be,
+      verdict: 'SKIP',
+    };
+    economics.verdict = farmVerdict(economics, rankLo, rankHi);
+    return economics;
   }
 
   return {
@@ -109,5 +172,8 @@
     secondActionFor: secondActionFor,
     stepText: stepText,
     farmSteps: farmSteps,
+    farmCost: farmCost,
+    farmVerdict: farmVerdict,
+    farmEconomics: farmEconomics,
   };
 });
