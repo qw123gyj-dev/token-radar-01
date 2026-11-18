@@ -1,4 +1,4 @@
-// Token Radar's dashboard (radar-3). It reads window.RADAR (written beside dashboard/
+// Token Radar's dashboard (radar-4). It reads window.RADAR (written beside dashboard/
 // by main.ts) and renders the ranked board, a filterable table, a per-protocol detail
 // view with the model's own inputs and the protocol's farm plan. No network: every byte
 // it shows is in data.js. The implied value and the farm plan come from the same shared
@@ -6,13 +6,15 @@
 //
 // Blind validation, computed from the snapshot's 119 live-token protocols by main.ts
 // (lib/model.ts validateModel) and carried in DATA.validation — nothing here is fitted
-// on the protocol it predicts: leave-one-out median absolute log error 1.30 for radar-3
-// (flat multiple 1.67, radar-2 1.68); five-fold average 1.26 (radar-2 1.65); predictions
-// within 2x of the real market cap 35/119 (flat 35/119, radar-2 26/119). The size curve
-// slope is -0.50 (within-category -0.34, without the 5 biggest protocols -0.52; market
-// cap itself grows as TVL^0.47). Every row's rank range and implied-value range come
-// from 200 bootstrap refits of the calibration; every farm plan is netted to a break-even
-// and a FARM / THIN / SKIP verdict (18 / 52 / 128 on this snapshot).
+// on the protocol it predicts: leave-one-out median absolute log error 1.17 for radar-4
+// (flat multiple 1.67, radar-2 1.68, radar-3 1.31); five-fold average 1.17 (radar-3
+// 1.26); five independent five-fold splits average 1.23 (radar-3 1.31); predictions
+// within 2x of the real market cap 38/119 (flat 35/119, radar-2 26/119, radar-3 35/119).
+// The size curve's joint slope is -0.52 (the raw slope -0.50, within-category -0.34,
+// without the 5 biggest protocols -0.52; market cap itself grows as TVL^0.47). Every
+// row's rank range and implied-value range come from 200 bootstrap refits of the
+// calibration; the median rank range is 40 wide. Every farm plan is netted to a
+// break-even and a FARM / THIN / SKIP verdict (26 / 34 / 138 on this snapshot).
 (function () {
   'use strict';
 
@@ -172,14 +174,16 @@
     var v = DATA.validation;
     var counts = { FARM: 0, THIN: 0, SKIP: 0 };
     DATA.rows.forEach(function (r) { counts[r.farm_verdict] = (counts[r.farm_verdict] || 0) + 1; });
+    var widths = DATA.rows.map(function (r) { return r.rank_hi - r.rank_lo; }).sort(function (a, b) { return a - b; });
+    var medianWidth = widths[Math.floor(widths.length / 2)];
     return el('section', { class: 'valid-strip' },
       el('h2', { text: 'Blind test — the model was not fitted on what it predicts' }),
       el('p', null,
         'On the snapshot\u2019s ' + v.live_n + ' live-token protocols, each refit on the training part only: leave-one-out median error ',
-        el('b', { text: 'radar-3 ' + v.loo_radar3.male.toFixed(2) }),
-        ' vs flat multiple ' + v.loo_flat.male.toFixed(2) + ' vs radar-2 ' + v.loo_radar2.male.toFixed(2) + '; five-fold average ',
-        el('b', { text: v.fivefold_radar3_male_avg.toFixed(2) }),
-        ' vs ' + v.fivefold_radar2_male_avg.toFixed(2) + '. Within 2x of the real market cap: ' + v.loo_radar3.hit_within_2x + ' (flat ' + v.loo_flat.hit_within_2x + ', radar-2 ' + v.loo_radar2.hit_within_2x + '). Size slope ' + v.slope.toFixed(2) + ' (within-category ' + v.slope_within_category.toFixed(2) + '; without the 5 biggest ' + v.slope_excl_top5_tvl.toFixed(2) + '). Every row carries a rank range from 200 refits and a farm verdict: ' + counts.FARM + ' FARM, ' + counts.THIN + ' THIN, ' + counts.SKIP + ' SKIP.'
+        el('b', { text: 'radar-4 ' + v.loo_radar4.male.toFixed(2) }),
+        ' vs flat multiple ' + v.loo_flat.male.toFixed(2) + ' vs radar-2 ' + v.loo_radar2.male.toFixed(2) + ' vs radar-3 ' + v.loo_radar3.male.toFixed(2) + '; five-fold average ',
+        el('b', { text: v.fivefold_radar4_male_avg.toFixed(2) }),
+        ' vs ' + v.fivefold_radar3_male_avg.toFixed(2) + '; five independent five-fold splits average ' + v.multi_split_radar4_avg.toFixed(2) + ' vs ' + v.multi_split_radar3_avg.toFixed(2) + '. Within 2x of the real market cap: ' + v.loo_radar4.hit_within_2x + ' (flat ' + v.loo_flat.hit_within_2x + ', radar-2 ' + v.loo_radar2.hit_within_2x + ', radar-3 ' + v.loo_radar3.hit_within_2x + '). Size slope ' + v.joint_slope.toFixed(2) + ' (raw ' + v.slope.toFixed(2) + ', within-category ' + v.slope_within_category.toFixed(2) + '; without the 5 biggest ' + v.slope_excl_top5_tvl.toFixed(2) + '). Every row carries a rank range from 200 refits (median width ' + medianWidth + ') and a farm verdict: ' + counts.FARM + ' FARM, ' + counts.THIN + ' THIN, ' + counts.SKIP + ' SKIP.'
       )
     );
   }
@@ -195,17 +199,18 @@
         el('td', { text: label }),
         el('td', { class: 'num', text: s.male.toFixed(2) }),
         el('td', { class: 'num', text: s.mean_abs_log_error.toFixed(2) }),
-        el('td', { class: 'num', text: s.hit_within_2x })
+        el('td', { class: 'num', text: s.hit_within_2x }),
+        el('td', { class: 'num', text: (s.spearman === undefined ? '—' : s.spearman.toFixed(2)) })
       );
     }
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'One function scores every row, from the snapshot figures alone. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x category_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + 0.02 x min(chains - 1, 5)) x size_multiplier )'
+        'implied = round( tvl_usd x category_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x size_multiplier )'
       ),
-      el('p', { class: 'sub', text: 'The category multiple is calibrated from this snapshot, not chosen by hand: for each category, the median market-cap-to-TVL ratio of its live-token protocols (each ratio winsorized at ' + m.winsor + '), shrunk toward the global median ' + m.global_median + ' with a prior weight of ' + m.prior + ', clamped to [' + m.multiple_min + ', ' + m.multiple_max + ']. A category with no live protocol in the snapshot uses the global median. Age is the time since the protocol was first listed, the best record of how long it has run with no token recorded; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
-      el('p', { class: 'sub', text: 'The size multiplier is exp(' + m.size_slope.toFixed(2) + ' x (ln tvl - ln ' + fmtUsd(m.size_ref_tvl_usd) + ')), the median live TVL, clamped to [1/' + m.size_clamp + ', ' + m.size_clamp + '] — the clamp never binds on this snapshot, it only bounds absurd extrapolation. Market cap grows slower than TVL: on the ' + v.live_n + ' live protocols the log-log slope of the market-cap-to-TVL ratio on TVL is ' + m.size_slope.toFixed(2) + ', so market cap itself grows as TVL^' + v.slope_direct_loglog.toFixed(2) + '. Within categories the slope is ' + v.slope_within_category.toFixed(2) + '; without the 5 biggest protocols ' + v.slope_excl_top5_tvl.toFixed(2) + ', without the 10 biggest ' + v.slope_excl_top10_tvl.toFixed(2) + '.' }),
+      el('p', { class: 'sub', text: 'The category multiple and the size curve are fitted jointly, not in two steps: the multiples are the medians of the size-adjusted log market-cap-to-TVL ratios of this snapshot\u2019s live-token protocols, shrunk toward the global median ' + m.global_median + ' with a prior weight of ' + m.prior + ', clamped to [' + m.multiple_min + ', ' + m.multiple_max + ']; the size slope is then refit on the log ratios with the multiples removed, and the two are alternated until they stop moving. Fitting them apart double-counts: a category\u2019s median absorbs the size effect of its own protocols, and the size slope absorbs the category mix. A category with no live protocol in the snapshot uses the global median. Age is the time since the protocol was first listed, the best record of how long it has run with no token recorded; an unlisted age uses ' + m.unknown_age_days + ' days. There is no chain-count term in radar-4: the blind test says it adds nothing, and putting it back costs 0.02 of leave-one-out median error.' }),
+      el('p', { class: 'sub', text: 'The size multiplier is exp(' + m.size_slope.toFixed(2) + ' x (ln tvl - ln ' + fmtUsd(m.size_ref_tvl_usd) + ')), the median live TVL, clamped to [1/' + m.size_clamp + ', ' + m.size_clamp + '] — the clamp never binds on this snapshot, it only bounds absurd extrapolation. Market cap grows slower than TVL: the joint slope is ' + m.size_slope.toFixed(2) + ', so market cap itself grows as TVL^' + v.slope_direct_loglog.toFixed(2) + '. The raw slope fitted apart is ' + v.slope.toFixed(2) + '; within categories ' + v.slope_within_category.toFixed(2) + '; without the 5 biggest protocols ' + v.slope_excl_top5_tvl.toFixed(2) + ', without the 10 biggest ' + v.slope_excl_top10_tvl.toFixed(2) + '.' }),
       el('div', { class: 'chips' }, multiples.map(function (x) {
         return el('span', { class: 'chip', text: x.category + ' x' + x.multiple.toFixed(2) });
       })),
@@ -216,15 +221,17 @@
           el('th', { scope: 'col', text: 'Model' }),
           el('th', { scope: 'col', class: 'num', text: 'Median error' }),
           el('th', { scope: 'col', class: 'num', text: 'Mean error' }),
-          el('th', { scope: 'col', class: 'num', text: 'Within 2x' })
+          el('th', { scope: 'col', class: 'num', text: 'Within 2x' }),
+          el('th', { scope: 'col', class: 'num', text: 'Rank corr.' })
         )),
         el('tbody', null,
           scoreRow('Flat global multiple (leave-one-out)', v.loo_flat),
           scoreRow('radar-2, category multiples (leave-one-out)', v.loo_radar2),
-          scoreRow('radar-3, category + size curve (leave-one-out)', v.loo_radar3)
+          scoreRow('radar-3, category + size curve, fitted apart (leave-one-out)', v.loo_radar3),
+          scoreRow('radar-4, joint fit (leave-one-out)', v.loo_radar4)
         )
       ),
-      el('p', { class: 'sub', text: 'Five-fold split by slug hash, average median error: radar-2 ' + v.fivefold_radar2_male_avg.toFixed(2) + ', radar-3 ' + v.fivefold_radar3_male_avg.toFixed(2) + ' (folds ' + v.fivefold_radar3_male_folds.map(function (x) { return x.toFixed(2); }).join(', ') + '). Ablations from radar-3, dropping one factor at a time (leave-one-out median error): growth ' + v.ablation_drop_growth_male.toFixed(2) + ', maturity ' + v.ablation_drop_maturity_male.toFixed(2) + ', chains ' + v.ablation_drop_chain_male.toFixed(2) + ' — near-noise, kept because the criteria name growth and age and keeping them costs almost nothing. Rank ranges and implied-value ranges are the 10th–90th percentiles of ' + v.bootstrap_refits + ' bootstrap refits of the calibration.' })
+      el('p', { class: 'sub', text: 'Five-fold split by slug hash, average median error: radar-2 ' + v.fivefold_radar2_male_avg.toFixed(2) + ', radar-3 ' + v.fivefold_radar3_male_avg.toFixed(2) + ', radar-4 ' + v.fivefold_radar4_male_avg.toFixed(2) + ' (folds ' + v.fivefold_radar4_male_folds.map(function (x) { return x.toFixed(2); }).join(', ') + '). The split is repeated on four more independent slug-hash splits: five-split averages radar-3 ' + v.multi_split_radar3_avg.toFixed(2) + ' (' + v.multi_split_radar3_splits.map(function (x) { return x.toFixed(2); }).join(', ') + '), radar-4 ' + v.multi_split_radar4_avg.toFixed(2) + ' (' + v.multi_split_radar4_splits.map(function (x) { return x.toFixed(2); }).join(', ') + '), so the gap is not one lucky split. Ablations from radar-4, one change at a time (leave-one-out median error): dropping growth ' + v.ablation_drop_growth_male.toFixed(2) + ', dropping maturity ' + v.ablation_drop_maturity_male.toFixed(2) + ', adding the chain-count term back ' + v.ablation_add_chain_male.toFixed(2) + ' — every change makes it worse, so all three are kept as fitted. The rank correlation is the Spearman correlation of predicted to real market cap across the 119 leave-one-out predictions: the flat multiple ranks slightly better (' + v.loo_flat.spearman.toFixed(2) + ') than radar-4 (' + v.loo_radar4.spearman.toFixed(2) + '), because the category multiples are noisy estimates and shuffle the TVL order; but its values are far off in level (median error 1.67 vs 1.17), and the board ranks by value, so calibration is what the board is for. Rank ranges and implied-value ranges are the 10th–90th percentiles of ' + v.bootstrap_refits + ' bootstrap refits of the calibration.' })
     );
   }
 
