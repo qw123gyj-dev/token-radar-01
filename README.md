@@ -15,8 +15,11 @@ farm each one.
 - `board.json` — the ranked board (198 rows: all 40 watchlist protocols plus 158 early
   rows below the watchlist floor; 24 live-token protocols are set aside, not ranked)
 - `data.js` — the dashboard's dataset, beside the page
-- `dashboard/` — a static page (no framework, no network): sortable and filterable board,
-  a detail view per protocol with its model breakdown and farm plan, and a live-token view
+- `dashboard/` — a static page (no framework, no network): a dense board that leads
+  with a KPI strip (rows ranked, total implied value, blind error, within-2x rate,
+  launch-odds accuracy, FARM count), the snapshot funnel, verdict/deposit/drop-share
+  chips, and a table with launch odds and net farm dollars per row; a detail view
+  per protocol with its model breakdown and farm plan, and a live-token view
 - `screenshots/` — board, detail and filtered views, stored as base64 text (`.b64`) so the
   repository stays text-only; `main.ts` decodes them into PNGs when it builds the output
 - `dossier.json` — the judge's dossier, written with `buildDossier` from
@@ -53,6 +56,41 @@ is fitted on the snapshot's own 119 live-token protocols, not asserted.
 The chain-count term is gone: under the new fit the blind test says it adds nothing
 (adding it back costs 0.02 of leave-one-out median error). The growth weight is 1.0,
 not 0.5: the blind test puts the week's move at full weight.
+
+## What radar-5 adds (value model unchanged)
+
+radar-5 keeps the radar-4 value model, rank ranges and verdict rule exactly, and
+adds three honestly-computed quantities plus a denser board. Nothing below is a
+forecast that a token will launch.
+
+- **Launch odds** (`lib/odds.js`, fitted in `lib/model.ts`): a logistic regression
+  on log TVL, log age, chain count, the clamped seven-day change and the
+  leave-one-out share of live-token protocols in the row's category, fitted on the
+  119 live-token protocols against the 198 rankable pre-token ones. The number says
+  how similar a protocol is to the ones that already record a token — a high-odds
+  protocol can sit unlaunched forever, and a low-odds one can launch tomorrow. The
+  dashboard and the board say so wherever the number appears. Held out,
+  leave-one-out over 317 protocols, it calls **70.0%** right (60 true launches,
+  36 false alarms, 59 missed, 162 true pre-token) against a 62.5% base rate of
+  predicting every protocol pre-token; its mean predicted odds are 57.1% for the
+  protocols that do record a token and 30.0% for the ones that do not.
+- **Net farm dollars**: low-end implied value x a stated **7% drop share** x deposit
+  / TVL − gas, per row, at a **$1,000 deposit** by default (selector: $1,000 /
+  $10,000; shares 3.5% / 7% / 14%). The share is an assumption, not a measurement:
+  no snapshot field says what fraction of a launch farmers receive, and the split
+  assumes every dollar of TVL farms on the same terms. At the default, 17 of 198
+  rows show a positive expected net (range −$29.18 to +$18.24). The FARM / THIN /
+  SKIP verdict does **not** use the net: it judges the plan's gas against the
+  low-end implied value and the rank range, as before.
+- **Deposit sizing**: farm plans are sized to the selected deposit — the plan's
+  capital is the deposit, and the net column recomputes with it. Gas at the $1,000
+  deposit is $23–31.
+- **Time-split validation**: the value model is fitted on live-token protocols
+  listed before 2025-01-01 (57) and tested on the ones listed after (30):
+  radar-4 median error **1.14**, vs flat 1.71 and radar-3 1.22.
+- **Funnel**: the 758 protocols read split as 416 already recording a token, 198
+  ranked, and 144 excluded — 128 by category, 11 versioned names, 5 wrapped or
+  staked — counted by the same rule that decides rankability.
 
 ## Blind validation (computed, not claimed)
 
@@ -99,26 +137,36 @@ on four more independent splits, so the average is not one lucky split.
   Polymarket 1–8, Veda 4–7); the median range width across the board is **40 ranks**
   (radar-3: 59) — the joint fit narrows the uncertainty, and the board says what
   is left.
-- **Farm verdicts**: each plan's gas ($19–27) and capital ($50–150, 30 days) are
-  netted against the low end of its implied-value range. FARM when the rank range sits
+- **Time split** (fit before 2025-01-01, test after; 57 train, 30 test): radar-4
+  **1.14**, flat 1.71, radar-3 1.22. A model fitted only on the older launches still
+  prices the newer ones better than the flat multiple does.
+- **Launch odds** (leave-one-out over 317 protocols): **70.0%** called right vs a
+  62.5% base rate (60 true launches, 36 false alarms, 59 missed, 162 true
+  pre-token); mean predicted odds 57.1% for live-token protocols, 30.0% for
+  pre-token ones. Resemblance, not a forecast.
+- **Farm verdicts**: each plan's gas ($23–31 at the $1,000 deposit) and capital
+  ($1,000, 30 days) are netted against the low end of its implied-value range. FARM when the rank range sits
   inside the top 40 and breaking even needs under 0.001% of the low-end value; THIN
   when the rank range can still reach the top 40 and breaking even needs under 0.01%;
   SKIP otherwise. On this snapshot: **26 FARM, 34 THIN, 138 SKIP** (radar-3: 18 / 52
-  / 128). Gas is never the binding constraint — the median break-even is 0.00049% of
+  / 128). Gas is never the binding constraint — the median break-even is 0.00058% of
   the low-end value — the rank range is what decides. The verdict is the 8th step of each plan, after the
   7 action steps, which are unchanged.
 
-The implied value and the farm plan are the shared functions in `lib/implied.js` and
-`lib/farm.js`, which the dashboard runs too (`dashboard/implied.js`, `dashboard/farm.js`),
-so the page and `board.json` cannot disagree — the page recomputes every row it shows,
-and all 198 rows recompute to the exact number `board.json` carries. Every farm plan
+The implied value, the farm plan and the launch odds are the shared functions in
+`lib/implied.js`, `lib/farm.js` and `lib/odds.js`, which the dashboard runs too
+(`dashboard/implied.js`, `dashboard/farm.js`, `dashboard/odds.js`), so the page and
+`board.json` cannot disagree — the page recomputes every row it shows, and all 198
+rows recompute to the exact implied value, launch odds and farm economics
+`board.json` carries (the page reports the mismatch counts in a hidden `#selfcheck`
+element: 0 on all four). Every farm plan
 is eight steps (7 action steps + the verdict step), each 20–600 characters, with what
 it costs and how long it takes, derived from the protocol's own category, chains, TVL
 and age.
 
 The run is deterministic: two runs of `main.ts` on the same snapshot write byte-identical
-output. The dossier is 741,359 bytes with the three screenshots (1280x800 each); the
-dashboard source text is 59,360 bytes, inside the 65,536-byte cap.
+output. The dossier is 820,574 bytes with the three screenshots (1280x800 each); the
+dashboard source text is 64,876 bytes, inside the 65,536-byte cap.
 
 ## Built with
 

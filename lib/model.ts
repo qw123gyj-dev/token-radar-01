@@ -53,6 +53,7 @@
 
 import impliedMod from './implied.js';
 import farmMod from './farm.js';
+import oddsMod from './odds.js';
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -133,6 +134,52 @@ export interface ValidationResult {
   slope_excl_top10_tvl: number;
   slope_direct_loglog: number;
   bootstrap_refits: number;
+  time_split: TimeSplitResult;
+}
+
+/** The value model fitted on the older live-token protocols only and tested on the newer ones: a by-time holdout, so the test set is the future the model never saw. */
+export interface TimeSplitResult {
+  cut: string;
+  train_n: number;
+  test_n: number;
+  radar4: ModelScore;
+  radar3: ModelScore;
+  flat: ModelScore;
+}
+
+/** The launch-odds classifier's fitted weights: standardized logistic regression. cat_counts carries, per category, [live-token protocols, protocols in all] so the page can recompute a row's leave-one-out category rate exactly. */
+export interface OddsModel {
+  weights: number[];
+  mu: number[];
+  sd: number[];
+  cat_counts: Record<string, [number, number]>;
+  global_rate: number;
+}
+
+/** The launch-odds classifier's held-out performance: leave-one-out over the 119 live-token and 198 rankable pre-token protocols. */
+export interface OddsValidation {
+  n: number;
+  pos: number;
+  base_rate: number;
+  accuracy: number;
+  tp: number;
+  fp: number;
+  fn: number;
+  tn: number;
+  mean_prob_live: number;
+  mean_prob_pre: number;
+}
+
+/** The snapshot's funnel: every protocol counted once, by the same rule that decides rankability. */
+export interface FunnelCounts {
+  total: number;
+  token_recorded: number;
+  pre_token: number;
+  ranked: number;
+  excl_category: number;
+  excl_versioned: number;
+  excl_wrapped: number;
+  excl_exchange: number;
 }
 
 export const MODEL_BASE: Omit<ModelConstants, 'global_median' | 'category_multiples' | 'size_slope' | 'size_ref_tvl_usd' | 'size_clamp'> = {
@@ -151,8 +198,8 @@ export const MODEL_BASE: Omit<ModelConstants, 'global_median' | 'category_multip
   multiple_max: 0.8,
 };
 
-/** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+/** The model's version label: the dashboard names it and the rules quote it. radar-5 keeps the radar-4 value model and adds launch odds, net farm dollars and the dense board. */
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -190,6 +237,8 @@ export interface BoardRow {
   farm_gas_usd: number;
   farm_capital_usd: number;
   farm_break_even_pct: number;
+  launch_odds: number;
+  farm_net_usd: number;
   farm_steps: string[];
 }
 
@@ -219,6 +268,9 @@ export interface RadarRow {
   farm_gas_usd: number;
   farm_capital_usd: number;
   farm_break_even_pct: number;
+  launch_odds: number;
+  farm_net_usd: number;
+  watchlist: boolean;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -246,6 +298,11 @@ export interface RadarData {
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
+  odds_model: OddsModel;
+  odds_validation: OddsValidation;
+  funnel: FunnelCounts;
+  deposit_default_usd: number;
+  drop_share_default: number;
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -347,6 +404,219 @@ export function liveProtocols(snapshot: Snapshot): SnapshotProtocol[] {
   return snapshot.protocols.filter(
     (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.category !== 'CEX',
   );
+}
+
+/** Solve A x = b for a small square matrix, by Gauss-Jordan elimination with partial pivoting. */
+function solveLinear(a: number[][], b: number[]): number[] {
+  const n = b.length;
+  const m = a.map((row, i) => [...row, b[i]!]);
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(m[r]![col]) > Math.abs(m[piv]![col])) piv = r;
+    if (piv !== col) {
+      const t = m[col]!;
+      m[col] = m[piv]!;
+      m[piv] = t;
+    }
+    const d = m[col]![col]!;
+    if (Math.abs(d) < 1e-12) continue;
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const f = m[r]![col]! / d;
+      if (f === 0) continue;
+      for (let c = col; c <= n; c++) m[r]![c]! -= f * m[col]![c]!;
+    }
+  }
+  return m.map((row, i) => (Math.abs(row[i]!) < 1e-12 ? 0 : row[n]! / row[i]!));
+}
+
+/**
+ * Logistic regression by iteratively reweighted least squares, with a ridge of 1 on
+ * the non-intercept weights: deterministic, no randomness, converges in a handful of
+ * steps at six features. Features are standardized on the training set; the returned
+ * weights, means and deviations are rounded to four decimals, and every prediction —
+ * in main.ts and on the dashboard page — uses those rounded values, so the two agree
+ * exactly.
+ */
+function fitLogReg(xs: number[][], ys: number[]): { weights: number[]; mu: number[]; sd: number[] } {
+  const d = xs[0]!.length;
+  const mu = new Array<number>(d).fill(0);
+  const sd = new Array<number>(d).fill(0);
+  for (let j = 1; j < d; j++) {
+    mu[j] = xs.reduce((a, x) => a + x[j]!, 0) / xs.length;
+    sd[j] = Math.sqrt(xs.reduce((a, x) => a + (x[j]! - mu[j]!) ** 2, 0) / xs.length) || 1;
+  }
+  const z = xs.map((x) => x.map((v, j) => (j === 0 ? v : (v - mu[j]!) / sd[j]!)));
+  let w = new Array<number>(d).fill(0);
+  for (let it = 0; it < 25; it++) {
+    const p = z.map((row) => {
+      const s = row.reduce((a, v, j) => a + w[j]! * v, 0);
+      return s >= 0 ? 1 / (1 + Math.exp(-s)) : Math.exp(s) / (1 + Math.exp(s));
+    });
+    const a: number[][] = Array.from({ length: d }, () => new Array<number>(d).fill(0));
+    const b: number[] = new Array<number>(d).fill(0);
+    for (let i = 0; i < z.length; i++) {
+      const wi = Math.max(p[i]! * (1 - p[i]!), 1e-6);
+      const zi = z[i]!.reduce((s, v, j) => s + w[j]! * v, 0) + (ys[i]! - p[i]!) / wi;
+      for (let j = 0; j < d; j++) {
+        for (let k = 0; k < d; k++) a[j]![k]! += wi * z[i]![j]! * z[i]![k]!;
+        b[j]! += wi * z[i]![j]! * zi;
+      }
+    }
+    for (let j = 1; j < d; j++) a[j]![j]! += 1;
+    const nw = solveLinear(a, b);
+    const delta = Math.max(...nw.map((v, j) => Math.abs(v - w[j]!)));
+    w = nw;
+    if (delta < 1e-6) break;
+  }
+  return { weights: w.map((v) => round4(v)), mu: mu.map((v) => round4(v)), sd: sd.map((v) => round4(v)) };
+}
+
+/** The launch-odds training population: the 119 live-token protocols (label 1) against the 198 rankable pre-token protocols (label 0). */
+export function oddsPopulation(snapshot: Snapshot): { p: SnapshotProtocol; y: number }[] {
+  const live = new Set(liveProtocols(snapshot).map((p) => p.slug));
+  const rows: { p: SnapshotProtocol; y: number }[] = [];
+  for (const p of snapshot.protocols) {
+    if (live.has(p.slug)) rows.push({ p, y: 1 });
+    else if (isRankable(p)) rows.push({ p, y: 0 });
+  }
+  return rows;
+}
+
+/** Per category, [live-token protocols, protocols in all], over one training population. */
+function catCounts(rows: { p: SnapshotProtocol; y: number }[]): { counts: Record<string, [number, number]>; global: number } {
+  const counts: Record<string, [number, number]> = {};
+  let pos = 0;
+  for (const r of rows) {
+    const c = r.p.category ?? 'Other';
+    const e = counts[c] ?? [0, 0];
+    e[1] += 1;
+    if (r.y === 1) {
+      e[0] += 1;
+      pos += 1;
+    }
+    counts[c] = e;
+  }
+  return { counts, global: rows.length ? pos / rows.length : 0 };
+}
+
+/** A protocol's category live-share, leave-one-out: the protocol never counts itself, so the feature cannot leak its own label. */
+function catRateFor(p: SnapshotProtocol, y: number, counts: Record<string, [number, number]>, global: number): number {
+  const e = counts[p.category ?? 'Other'];
+  if (!e || e[1] <= 1) return global;
+  return (e[0] - (y === 1 ? 1 : 0)) / (e[1] - 1);
+}
+
+/**
+ * The launch-odds classifier, fitted on the snapshot: logistic regression on log TVL,
+ * log age, chain count, clamped seven-day change and the leave-one-out category
+ * live-share (lib/odds.js carries the features). excludeSlug refits without one
+ * protocol, for the leave-one-out validation.
+ */
+export function fitLaunchOdds(snapshot: Snapshot, excludeSlug: string | null = null): OddsModel {
+  const pop = oddsPopulation(snapshot).filter((r) => r.p.slug !== excludeSlug);
+  const { counts, global } = catCounts(pop);
+  const xs = pop.map((r) =>
+    (oddsMod as any).features({
+      tvl_usd: r.p.tvl_usd,
+      age_days: ageDays(snapshot.as_of, r.p.listed_at),
+      chains: r.p.chains,
+      change_7d: r.p.change_7d,
+      category_rate: catRateFor(r.p, r.y, counts, global),
+    }),
+  );
+  const ys = pop.map((r) => r.y);
+  const fit = fitLogReg(xs, ys);
+  return { weights: fit.weights, mu: fit.mu, sd: fit.sd, cat_counts: counts, global_rate: round4(global) };
+}
+
+/** One protocol's launch odds under a fitted model: the resemblance score, 0 to 1, rounded to three decimals. Board rows are pre-token, so their category rate is the leave-one-out rate for a label-0 member. */
+export function launchOddsFor(p: SnapshotProtocol, snapshot: Snapshot, model: OddsModel): number {
+  const age = ageDays(snapshot.as_of, p.listed_at);
+  const rate = catRateFor(p, 0, model.cat_counts, model.global_rate);
+  const x = (oddsMod as any).features({
+    tvl_usd: p.tvl_usd,
+    age_days: age,
+    chains: p.chains,
+    change_7d: p.change_7d,
+    category_rate: rate,
+  });
+  return (oddsMod as any).round3((oddsMod as any).predictFromFeatures(x, model));
+}
+
+/**
+ * The launch-odds classifier's held-out performance: leave-one-out over the 317
+ * protocols, each fold refitting without the protocol it predicts. The base rate is
+ * the accuracy of predicting every protocol pre-token.
+ */
+export function validateLaunchOdds(snapshot: Snapshot): OddsValidation {
+  const pop = oddsPopulation(snapshot);
+  const pos = pop.filter((r) => r.y === 1).length;
+  let tp = 0;
+  let fp = 0;
+  let fn = 0;
+  let tn = 0;
+  let sumLive = 0;
+  let sumPre = 0;
+  for (const held of pop) {
+    const model = fitLaunchOdds(snapshot, held.p.slug);
+    const pr = launchOddsFor(held.p, snapshot, model);
+    const pred = pr >= 0.5 ? 1 : 0;
+    if (pred === 1 && held.y === 1) tp++;
+    else if (pred === 1) fp++;
+    else if (held.y === 1) fn++;
+    else tn++;
+    if (held.y === 1) sumLive += pr;
+    else sumPre += pr;
+  }
+  return {
+    n: pop.length,
+    pos,
+    base_rate: round4((pop.length - pos) / pop.length),
+    accuracy: round4((tp + tn) / pop.length),
+    tp,
+    fp,
+    fn,
+    tn,
+    mean_prob_live: round4(sumLive / pos),
+    mean_prob_pre: round4(sumPre / (pop.length - pos)),
+  };
+}
+
+/** The snapshot's funnel: every protocol counted once, by the same rule that decides rankability, in the same order isRankable applies it. */
+export function funnelCounts(snapshot: Snapshot): FunnelCounts {
+  let token = 0;
+  let pre = 0;
+  let ranked = 0;
+  let cat = 0;
+  let ver = 0;
+  let wrap = 0;
+  let exch = 0;
+  for (const p of snapshot.protocols) {
+    if (!isPreToken(p)) {
+      token++;
+      continue;
+    }
+    pre++;
+    if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) {
+      cat++;
+      continue;
+    }
+    if (VERSIONED.test(p.name)) {
+      ver++;
+      continue;
+    }
+    if (WRAPPED_OR_STAKED.test(p.name)) {
+      wrap++;
+      continue;
+    }
+    if (EXCHANGE_PREFIXES.some((x) => p.name.startsWith(x))) {
+      exch++;
+      continue;
+    }
+    ranked++;
+  }
+  return { total: snapshot.protocols.length, token_recorded: token, pre_token: pre, ranked, excl_category: cat, excl_versioned: ver, excl_wrapped: wrap, excl_exchange: exch };
 }
 
 /**
@@ -595,6 +865,21 @@ export function validateModel(snapshot: Snapshot): ValidationResult {
   const sortedByTvl = [...live].sort((a, b) => b.tvl_usd - a.tvl_usd);
   const top5 = new Set(sortedByTvl.slice(0, 5).map((p) => p.slug));
   const top10 = new Set(sortedByTvl.slice(0, 10).map((p) => p.slug));
+  // The by-time holdout: fit on the live protocols listed before 2025-01-01, test on
+  // the ones listed after — the test set is the future the model never saw. 32 live
+  // protocols report no listing date and sit out of both sides.
+  const dated = live.filter((p) => p.listed_at !== null);
+  const tsCut = '2025-01-01';
+  const tsTrain = dated.filter((p) => p.listed_at! < tsCut);
+  const tsTest = dated.filter((p) => p.listed_at! >= tsCut);
+  const timeSplit: TimeSplitResult = {
+    cut: tsCut,
+    train_n: tsTrain.length,
+    test_n: tsTest.length,
+    radar4: scoreVariant(tsTrain, tsTest, snapshot, r4),
+    radar3: scoreVariant(tsTrain, tsTest, snapshot, r3),
+    flat: scoreVariant(tsTrain, tsTest, snapshot, { ...base, flat: true }),
+  };
   return {
     live_n: live.length,
     loo_flat: looFlat,
@@ -625,6 +910,7 @@ export function validateModel(snapshot: Snapshot): ValidationResult {
       })(),
     ),
     bootstrap_refits: 200,
+    time_split: timeSplit,
   };
 }
 
@@ -779,6 +1065,7 @@ export function buildBoard(
   });
   scored.sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   const ranges = bootstrapRanges(snapshot, scored, calibration, sizeFit.slope, sizeFit.ref_tvl_usd);
+  const odds = fitLaunchOdds(snapshot);
   return scored.map((s, i) => {
     const range = ranges.get(s.p.slug)!;
     const economics = (farmMod as any).farmEconomics(
@@ -823,6 +1110,8 @@ export function buildBoard(
       farm_gas_usd: economics.gas_usd,
       farm_capital_usd: economics.capital_usd,
       farm_break_even_pct: economics.break_even_pct,
+      launch_odds: launchOddsFor(s.p, snapshot, odds),
+      farm_net_usd: economics.net_usd,
       farm_steps: steps,
     };
   });
@@ -852,7 +1141,7 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 }
 
 /** A board row's compact form for data.js. */
-export function radarRow(row: BoardRow): RadarRow {
+export function radarRow(row: BoardRow, watchlist: boolean): RadarRow {
   return {
     rank: row.rank,
     slug: row.slug,
@@ -878,6 +1167,9 @@ export function radarRow(row: BoardRow): RadarRow {
     farm_gas_usd: row.farm_gas_usd,
     farm_capital_usd: row.farm_capital_usd,
     farm_break_even_pct: row.farm_break_even_pct,
+    launch_odds: row.launch_odds,
+    farm_net_usd: row.farm_net_usd,
+    watchlist,
   };
 }
 
@@ -889,6 +1181,9 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const board = buildBoard(snapshot, calibration, sizeFit);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const odds = fitLaunchOdds(snapshot);
+  const oddsValidation = validateLaunchOdds(snapshot);
+  const funnel = funnelCounts(snapshot);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -907,8 +1202,13 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     board_size: board.length,
     early_size: early,
     live_size: live.length,
-    rows: board.map(radarRow),
+    rows: board.map((r) => radarRow(r, snapshot.watchlist.includes(r.slug))),
     live,
+    odds_model: odds,
+    odds_validation: oddsValidation,
+    funnel,
+    deposit_default_usd: 1000,
+    drop_share_default: 0.07,
   };
   return { board, radar };
 }
